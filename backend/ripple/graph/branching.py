@@ -1,33 +1,27 @@
-"""Hypothetical intervention branches via GRAPH.COPY.
+"""Isolated GRAPH.COPY snapshots; never a physics simulator."""
 
-A branch is a *snapshot* of the main graph that a candidate plan's predicted effects are
-written into. It is not a physics simulation. Branches must always be cleaned up.
-
-TODO(siddharth): confirm GRAPH.COPY availability/semantics in the FalkorDB version we run."""
-
-from collections.abc import Iterator
+import time
 from contextlib import contextmanager
+from uuid import uuid4
 
-from falkordb import FalkorDB, Graph
-
-
-def create_branch(db: FalkorDB, source: str, branch: str) -> Graph:
-    """Copy graph `source` to `branch` and return the branch handle."""
-    raise NotImplementedError("TODO(siddharth): GRAPH.COPY")
-
-
-def delete_branch(db: FalkorDB, branch: str) -> None:
-    """Delete a branch graph. Must never delete the main graph."""
-    raise NotImplementedError("TODO(siddharth): delete branch")
+from falkordb import Graph
+from redis.exceptions import ResponseError
 
 
 @contextmanager
-def branch(db: FalkorDB, source: str, name: str) -> Iterator[Graph]:
-    """Context manager: create a branch, yield it, always delete on exit."""
-    raise NotImplementedError("TODO(siddharth): branch lifecycle")
-    yield  # pragma: no cover
-
-
-def cleanup_orphan_branches(db: FalkorDB, prefix: str) -> list[str]:
-    """Delete leftover branch graphs whose names start with `prefix`; return deleted names."""
-    raise NotImplementedError("TODO(siddharth): orphan cleanup")
+def snapshot(source: Graph):
+    name = f"{source.name}__branch__{uuid4().hex}"
+    for attempt in range(6):
+        try:
+            copied = source.copy(name)
+            break
+        except ResponseError as error:
+            if "could not fork" not in str(error) or attempt == 5:
+                raise
+            # Redis permits only one module fork at a time. Brief bounded retry
+            # handles another process copying a graph; never substitute a fake copy.
+            time.sleep(0.05 * 2**attempt)
+    try:
+        yield copied
+    finally:
+        copied.delete()

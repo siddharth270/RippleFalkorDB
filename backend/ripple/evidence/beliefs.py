@@ -40,7 +40,13 @@ def belief(
     latest = repository.latest_observation(graph, asset_id, prop)
     if latest is None:
         return Belief(asset_id, prop, None, "missing")
-    status: Status = "fresh" if is_fresh(prop, latest["observed_at"], now) else "stale"
+    status: Status = (
+        "predicted"
+        if latest["source"] == "predicted"
+        else "fresh"
+        if is_fresh(prop, latest["observed_at"], now)
+        else "stale"
+    )
     return Belief(asset_id, prop, latest["value"], status, latest["source"], latest["observed_at"])
 
 

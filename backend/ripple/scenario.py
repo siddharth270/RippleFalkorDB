@@ -27,6 +27,8 @@ def load_scenario(path: Path | str) -> dict[str, Any]:
         truth.setdefault(asset, {}).update(props)
 
     graph = dict(spec.get("graph", parent["graph"]))
+    for key in ("nodes", "relationships"):
+        graph[key] = [*graph.get(key, []), *spec.get("extra_" + key, [])]
     extra = spec.get("extra_observations", [])
     if extra:
         graph["observations"] = [*graph.get("observations", []), *extra]

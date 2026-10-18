@@ -1,2 +1,13 @@
-# Scenario: new_load — Topology change: an extra load is added (no code change).
-# TODO(siddharth): define schema (known graph facts vs. hidden truth) and fill in.
+name: new_load
+extends: healthy_8
+description: An extra critical 2-unit load raises demand to 9; the same planner must shed B.
+extra_nodes:
+  - {labels: [Asset, Machine], id: machine_c, name: Machine C, demand: 2, criticality: critical}
+  - {labels: [Service], id: line_c, name: Line C production, critical: true}
+extra_relationships:
+  - {type: FEEDS, from: cooling_header, to: machine_c}
+  - {type: CONNECTED_TO, from: cooling_header, to: machine_c}
+  - {type: LOCATED_IN, from: machine_c, to: machine_hall}
+  - {type: PROVIDES_SERVICE, from: machine_c, to: line_c}
+truth:
+  machine_c: {running: true}

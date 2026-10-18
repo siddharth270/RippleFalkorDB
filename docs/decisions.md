@@ -133,3 +133,12 @@
 - **Stale evidence:** `stale_evidence` lists decision-relevant facts that are missing or older than their window
   (windows passed from `freshness.py`); `stale_valve` scenario proves an hour-old "bypass open" log is not trusted.
 - **Scenario loader:** `extra_observations` lets a scenario add prior evidence while inheriting the base graph.
+
+
+## D-015 — Branches, provenance and simulation delivery (2026-10-18)
+
+Use real GRAPH.COPY for candidate evaluation; predicted observations exist only on disposable branches. Retry only the explicit Redis fork-contention error, with a bounded delay. Generate bounded cooling-domain candidates from graph actions rather than embedding the scenario list in the orchestrator. Record the current revision and available evidence context before execution, then render explanations from persisted records. This is not an atomic transaction spanning physical actuation.
+
+Expose event snapshots through a local FastAPI/WebSocket demo and label stale evidence. Add a critical load in YAML as a topology generalization check. Compare three transparent deterministic policies across six scenarios; this is a diagnostic matrix, not a statistical benchmark.
+
+Cyberwave uses a dedicated environment twin and seven equipment markers, with SDK repositioning independently read back through REST. Preserve the distinction between synthetic facility sensing, twin positioning, and physically simulated robotics. Do not start billable simulation for this path.

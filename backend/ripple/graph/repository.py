@@ -220,9 +220,33 @@ def open_incident(graph: Graph, incident_id: str, asset_id: str, now: float) -> 
 
 def create_decision(graph: Graph, decision: Any) -> str:
     """Persist a Decision with CONSIDERED/REJECTED/SELECTED/BASED_ON edges (Milestone 4)."""
-    raise NotImplementedError("TODO(siddharth): create_decision (Milestone 4)")
+    return _run(graph, "provenance/create_decision", decision, write=True)[0]["id"]
 
 
 def decision_trace(graph: Graph, decision_id: str) -> list[Row]:
     """Full provenance trace of a Decision (Milestone 4)."""
-    raise NotImplementedError("TODO(siddharth): decision_trace (Milestone 4)")
+    return _run(graph, "provenance/decision_trace", {"decision_id": decision_id}, write=False)
+
+
+def action_catalog(graph: Graph) -> list[Row]:
+    return _run(graph, "actions/catalog", write=False)
+
+
+def decision_context(graph: Graph) -> Row:
+    return _run(graph, "provenance/context", write=False)[0]
+
+
+def scene(graph: Graph, now: float | None = None) -> dict:
+    from ripple.evidence.freshness import is_fresh
+
+    evidence = _run(graph, "ui/evidence", write=False)
+    if now is not None:
+        for observation in evidence:
+            observation["fresh"] = is_fresh(
+                observation["property"], observation["observed_at"], now
+            )
+    return {
+        "nodes": _run(graph, "ui/nodes", write=False),
+        "edges": _run(graph, "ui/edges", write=False),
+        "evidence": evidence,
+    }

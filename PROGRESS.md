@@ -1,7 +1,7 @@
 # Progress
 
 ## Current step
-**Milestone 4 — hypothetical branches + explanations** (Milestones 2–3 complete; see HANDOFF.md).
+**Milestone 4 and the core Milestone 5 simulation demo are implemented.** See the [submission guide](docs/submission.md) for judge setup and current scope.
 
 ## Log
 
@@ -45,7 +45,7 @@
 - **Tested:** with the completed queries (verification overlay) → 24 passed. In-repo `.cypher` bodies pending.
 - **Next:** paste queries → `uv run pytest` green → Milestone 2 (impact queries, capacity check).
 - **M1 DONE:** all queries pasted; `uv run pytest` → 24 passed. M2–M4 queries pasted (not yet wired).
-- **Housekeeping:** AI_USAGE.md removed at Siddharth's request; README carries a one-line AI disclosure. HANDOFF.md added for collaborators.
+- **Housekeeping:** AI_USAGE.md removed at Siddharth's request; README carries a one-line AI disclosure. A collaborator handoff was added at that stage; it has since been removed from the judging submission.
 - **Next:** M2 — wire impact queries, implement `planning/capacity.py`, reject "isolate primary now".
 
 ### 2026-10-17 — Milestones 2 & 3
@@ -56,3 +56,7 @@
   decision-driven inspection loop, hop-by-hop routing via `algo.SPpaths`, `stale_evidence`, `stale_valve` + `stuck_valve` scenarios.
 - **Tested:** `uv run pytest` → 35 passed.
 - **Next:** M4 — GRAPH.COPY branch per candidate plan, Decision provenance, explanations from `decision_trace`.
+
+
+## 2026-10-18 — M4 and simulation demo
+Implemented graph copies, graph-driven candidate generation, persisted explanations, six-scenario evaluation, dashboard and Cyberwave scene. Initial expanded regression: 43 tests passed. Cyberwave healthy_5: recovered, seven inspections, zero verification failures. See docs/demo-script.md for the script and remaining proposal gaps. Changes remain local.

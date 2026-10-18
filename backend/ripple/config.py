@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     robot_adapter: Literal["mock", "cyberwave"] = "mock"
     cyberwave_api_key: str | None = None
 
+    cyberwave_workspace_id: str | None = None
+    cyberwave_environment_id: str | None = None
+    cyberwave_twin_id: str | None = None
+
     llm_api_key: str | None = None
     llm_model: str = "claude-sonnet-5-5"
 

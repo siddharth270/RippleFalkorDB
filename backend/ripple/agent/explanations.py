@@ -1,8 +1,12 @@
-"""Explanation text built ONLY from recorded Decision trace rows and validator outcomes."""
-
-from typing import Any
-
-
-def explain(trace_rows: list[dict[str, Any]]) -> str:
-    """Format a decision trace (from repository.decision_trace) as text. No invented facts."""
-    raise NotImplementedError("TODO(siddharth): explanations")
+"""Format only persisted decision trace facts."""
+def explain(trace_rows):
+    if not trace_rows:
+        return "No recorded decision."
+    row = trace_rows[0]
+    lines = [row["summary"], f"Decision recorded at graph revision {row['revision']}."]
+    for plan in row["plans"]:
+        if plan["selected"]:
+            lines.append("Selected: " + " → ".join(plan["actions"]) + ".")
+        elif plan["rejected_reason"]:
+            lines.append(f"Rejected {plan['plan']}: {plan['rejected_reason']}")
+    return "\n".join(lines)

@@ -1,11 +1,10 @@
 """The core loop: observe -> update evidence -> query dependencies -> identify uncertainty ->
 inspect -> evaluate plans -> validate -> execute -> verify.
 
-Through M3:
+Simulation implementation:
 - Dependencies, prerequisites, capacity topology, inspection points, routes, hypotheses and
   effects all come from graph queries (repository).
-- Candidate plans are a fixed, preference-ordered list (D-012); M4 replaces their evaluation
-  with GRAPH.COPY branches.
+- Candidate plans are generated from graph actions and evaluated in GRAPH.COPY branches.
 - Decision-driven inspection: the robot inspects only while a more-preferred plan is still
   undecided, and picks the inspection point with the best decision relevance score.
 - Sensing and actuation are injected callables, so this module never touches the simulator's
@@ -19,27 +18,18 @@ from uuid import uuid4
 
 from falkordb import Graph
 
+from ripple.agent.explanations import explain
 from ripple.evidence.beliefs import belief, compare
 from ripple.evidence.freshness import DEFAULT_WINDOW_S, FRESHNESS_WINDOWS_S
 from ripple.evidence.hypotheses import classify
 from ripple.evidence.models import Observation
 from ripple.graph import repository
+from ripple.planning.candidates import generate_candidates
+from ripple.planning.evaluator import evaluate_plan
 from ripple.planning.inspection_ranker import rank_inspections
-from ripple.planning.validator import ValidationResult, check_action, validate_plan
+from ripple.planning.validator import ValidationResult, check_action
 from ripple.robot.base import Pose, RobotAdapter, arrived
 
-# Preference order. The first is the obvious local fix; the graph must justify rejecting it.
-CANDIDATE_PLANS: dict[str, list[str]] = {
-    "isolate_primary_now": ["isolate_primary"],
-    "restore_via_standby": ["activate_standby", "open_bypass", "isolate_primary"],
-    "reduce_load_then_restore": [
-        "shed_load_b",
-        "activate_standby",
-        "open_bypass",
-        "isolate_primary",
-    ],
-    "shed_noncritical_load": ["shed_load_b"],  # approved degraded operation
-}
 MAX_DIAGNOSIS_ROUNDS = 6
 MAX_RECHECK_ROUNDS = 3
 MOVE_RETRIES = 2
@@ -66,6 +56,9 @@ class IncidentResult:
     service: dict[str, Any] = field(default_factory=dict)
     travel_cost: float = 0.0
     recovered: bool = False
+    decision_id: str | None = None
+    explanation: str = ""
+    evaluations: list[dict] = field(default_factory=list)
 
     def inspected(self, purpose: str | None = None) -> list[str]:
         return [i["ip_id"] for i in self.inspections if purpose is None or i["purpose"] == purpose]
@@ -80,6 +73,8 @@ class Orchestrator:
         actuate: Actuate,
         clock: Callable[[], float],
         robot_id: str = "robot_1",
+        on_event: Callable | None = None,
+        mode: str = "full_ripple",
     ) -> None:
         self.graph = graph
         self.robot = robot
@@ -87,6 +82,9 @@ class Orchestrator:
         self.actuate = actuate
         self.clock = clock
         self.robot_id = robot_id
+        self.on_event = on_event or (lambda event: None)
+        self.mode = mode
+        self.plans = {}
 
     def run_incident(self, trigger_asset_id: str) -> IncidentResult:
         """Handle an alarm on `trigger_asset_id`; return what was traced, inspected, chosen, verified."""
@@ -98,14 +96,52 @@ class Orchestrator:
             self.graph, self.clock(), FRESHNESS_WINDOWS_S, DEFAULT_WINDOW_S
         )
 
+        self.plans = generate_candidates(self.graph, trigger_asset_id)
+        self.on_event({"type": "impact", "impact": result.impact, "stale": result.stale_at_start})
         plan = self._choose_plan(result)
+        self._record_decision(result, plan)
         result.chosen_plan = plan
         if plan is not None:
-            executed = self._execute(CANDIDATE_PLANS[plan], result)
+            executed = self._execute(self.plans[plan], result)
             served = self._verify_service(result)
             result.recovered = executed and served
         result.hypotheses = repository.open_hypotheses(self.graph, result.incident_id)
+        self.on_event(
+            {"type": "complete", "recovered": result.recovered, "service": result.service}
+        )
         return result
+
+    def _record_decision(self, result, selected):
+        context = repository.decision_context(self.graph)
+        result.decision_id = f"decision_{uuid4().hex}"
+        repository.create_decision(
+            self.graph,
+            {
+                "id": result.decision_id,
+                "incident_id": result.incident_id,
+                "made_at": self.clock(),
+                "revision": context["revision"],
+                "summary": "Selected " + selected
+                if selected
+                else "No feasible plan with available evidence.",
+                "observation_ids": context["observation_ids"],
+                "plans": [
+                    {
+                        "name": name,
+                        "actions": actions,
+                        "selected": name == selected,
+                        "rejected_reason": "; ".join(result.rejected[name])
+                        if name in result.rejected and name != selected
+                        else None,
+                    }
+                    for name, actions in self.plans.items()
+                ],
+            },
+        )
+        result.explanation = explain(repository.decision_trace(self.graph, result.decision_id))
+        self.on_event(
+            {"type": "decision", "chosen_plan": selected, "explanation": result.explanation}
+        )
 
     # --- dependencies (M2) --------------------------------------------------------
     def _trace_dependencies(self, trigger: str) -> dict[str, Any]:
@@ -136,10 +172,25 @@ class Orchestrator:
         unobtainable: set[str] = set()
         for _ in range(MAX_DIAGNOSIS_ROUNDS):
             evaluations = {
-                name: validate_plan(self.graph, actions, self.clock())
-                for name, actions in CANDIDATE_PLANS.items()
+                name: evaluate_plan(self.graph, actions, self.clock())
+                for name, actions in self.plans.items()
                 if name not in unobtainable
             }
+            rows = [
+                {
+                    "name": name,
+                    "actions": self.plans[name],
+                    "status": "rejected"
+                    if ev.rejected
+                    else "feasible"
+                    if ev.ok
+                    else "needs evidence",
+                    "reasons": ev.reasons,
+                }
+                for name, ev in evaluations.items()
+            ]
+            result.evaluations = rows
+            self.on_event({"type": "branches", "plans": rows})
             undecided: dict[str, ValidationResult] = {}
             for name, ev in evaluations.items():
                 if ev.rejected:
@@ -153,6 +204,11 @@ class Orchestrator:
             if not undecided:
                 return None
 
+            if self.mode == "graph_no_inspection":
+                for name, ev in undecided.items():
+                    result.rejected[name] = ["inspection disabled: " + "; ".join(ev.notes)]
+                    unobtainable.add(name)
+                continue
             ranked = rank_inspections(
                 self.graph,
                 self.robot_id,
@@ -160,6 +216,7 @@ class Orchestrator:
                 {name: ev.missing for name, ev in undecided.items()},
             )
             result.rankings.append([c.summary() for c in ranked])
+            self.on_event({"type": "inspection_ranking", "ranking": result.rankings[-1]})
             if not ranked or ranked[0].blocks == 0:
                 # No reachable inspection can resolve the undecided plans: give up on them.
                 for name, ev in undecided.items():
@@ -180,6 +237,14 @@ class Orchestrator:
                 self._link_hypotheses(obs, result)
         result.inspections.append({"ip_id": ip_id, "purpose": purpose, "travel_cost": travel})
         result.travel_cost += travel
+        self.on_event(
+            {
+                "type": "inspection",
+                "ip_id": ip_id,
+                "purpose": purpose,
+                "observations": [o.model_dump() for o in observations],
+            }
+        )
         return observations
 
     def _inspect_item(
@@ -217,6 +282,7 @@ class Orchestrator:
                     repository.set_robot_location(
                         self.graph, self.robot_id, location_id, self.clock()
                     )
+                    self.on_event({"type": "move", "location_id": location_id, "x": x, "y": y})
                     break
             else:
                 raise RobotMoveFailed(f"{self.robot_id} did not reach {location_id}")
@@ -282,7 +348,8 @@ class Orchestrator:
                 "status": status,
             }
         )
-        return status == "verified"
+        self.on_event({"type": "verification", **result.attempts[-1]})
+        return ack["accepted"] and status == "verified"
 
     def _verify_service(self, result: IncidentResult) -> bool:
         """Operational check (invariant #3): observed header flow must cover running machines' demand."""

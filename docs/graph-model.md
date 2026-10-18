@@ -1,150 +1,95 @@
-# Graph data model (v1)
+# Implemented graph data model
 
-> v1 drafted by Claude from CLAUDE.md §6 and `docs/proposal.md` §5; decision points DP1–DP5 reviewed and
-> accepted by Siddharth (D-008).
-> All capacities and equipment are **synthetic simulation assumptions**.
+This document describes the running simulation, not every extension proposed in the original concept. Node and edge creation is defined by [scenario seeding](../backend/ripple/graph/seed.py) and [named runtime queries](../backend/ripple/graph/queries/). All facility values are synthetic.
 
-## Decision points (accepted, D-008)
-
-| # | Question | v1 choice | Why (short) |
-|---|---|---|---|
-| **DP1** | Is an asset's *current state* (valve position, standby capacity, pump health) a property on the asset node, or only the latest `Observation`? | **Only Observations.** Assets hold static design facts (`nominal_capacity`, `demand`, `criticality`); anything that changes is an `Observation` node. | One source of truth for state; every belief has time + provenance, so freshness is queryable. Avoids "stale property nobody updated". |
-| **DP2** | `FEEDS` and `CONNECTED_TO`: both, or one? | **Both.** `CONNECTED_TO` = physical pipe (undirected meaning). `FEEDS` = directed operational flow path (non-return assumed). | Proposal's key distinction: connected ≠ able to supply. Impact traversal uses `FEEDS`; whether flow is *sufficient* is computed in `planning/capacity.py`, never inferred from a path. |
-| **DP3** | `InspectionPoint`: secondary label of `Asset` (CLAUDE.md draft) or its own node? | **Own node** `:InspectionPoint`, `-[:INSPECTS {property}]->(:Asset)`, `-[:LOCATED_IN]->(:Location)`. | An inspection point isn't equipment: it doesn't feed, fail, or carry load. Putting it under `Asset` would pollute impact traversals (`MATCH (a:Asset)` would return gauges). |
-| **DP4** | Robot position: pose property on `:Robot`, or a relationship? | **`(:Robot)-[:AT]->(:Location)`**, moved **only after verified arrival** (`robot.base.arrived`). `x, y` live on `Location` (D-005). | Location-gated sensing becomes a graph check (`robot AT loc ← ip LOCATED_IN loc`). Edge moves on *observed* arrival, not on command (invariant #3). |
-| **DP5** | How do hypothetical branches represent predicted effects? | Transition model writes **`Observation` nodes with `source: "predicted"`** into the `GRAPH.COPY` branch. | The **same** evaluation queries run unchanged on main and branch graphs, and predicted facts can never be confused with real ones (source is explicit; branches are deleted). |
-
-## Conventions
-- Every node has a string `id` (stable, human-readable: `primary_supply`, `ip_standby_pump`).
-- Times are epoch seconds (`float`), simulation clock.
-- Relationships are created in one direction; symmetric ones (`CONNECTED_TO`, `ADJACENT_TO`) are queried undirected `-[:R]-`.
-- Labels are nouns, relationships are verbs in UPPER_SNAKE.
-
-## Node labels
-
-### Infrastructure
-| Label | Key properties | Notes |
-|---|---|---|
-| `Asset:Supply` | `id, name, nominal_capacity` (units) | Primary = 8; standby = 8 / 5 / unavailable **per scenario, as truth**: the graph only knows `nominal_capacity`; actual capacity is an Observation (DP1). |
-| `Asset:Valve` | `id, name, normally` (`"open"`/`"closed"`) | Position is evidence, not a property. |
-| `Asset:Header` | `id, name` | Shared cooling header. |
-| `Asset:Machine` | `id, name, demand` (units), `criticality` (`"critical"`/`"low"`) | A = 4 critical, B = 3 low. |
-| `Service` | `id, name, critical` (bool) | Business function a machine provides (e.g. "Line A production"). Answers "which affected services are critical?". |
-| `Location` | `id, name, x, y` | Robot-navigable places. Coordinates feed the robot adapter (D-005). |
-| `InspectionPoint` | `id, name` | Where the robot can read a property (DP3). |
-| `Sensor` | `id, kind` | Fixed sensors (e.g. machine A temperature alarm). |
-| `Robot` | `id, name` | One robot in MVP. |
-
-### Evidence & hypotheses
-| Label | Key properties | Notes |
-|---|---|---|
-| `Observation` | `id, property, value, unit, observed_at, ingested_at, quality` (0–1), `source` (`"robot"`/`"sensor"`/`"log"`/`"predicted"`), `mission_id` | Never overwritten; latest per (asset, property) wins. Freshness windows per property live in `evidence/freshness.py` and are passed to queries as a parameter map. |
-| `Incident` | `id, opened_at, status` | Groups everything about one fault. |
-| `Hypothesis` | `id, name, status` (`"open"`/`"supported"`/`"rejected"`) | e.g. primary failure, restricted flow, wrong valve state, faulty temp reading. |
-
-### Actions & planning
-| Label | Key properties | Notes |
-|---|---|---|
-| `Action` | `id, name, kind` | e.g. `activate_standby`, `open_bypass`, `reduce_load_b`, `isolate_primary`. |
-| `Condition` | `id, property, op, value, kind` (`"evidence"`/`"computed"`), `check` | Evidence condition: latest fresh Observation must satisfy `op value`. Computed condition (e.g. `check: "demand_within_capacity"`) is evaluated by `planning/capacity.py`. |
-| `Plan` | `id, name` | A candidate sequence. |
-| `PlanStep` | `id, order` | |
-| `Decision` | `id, made_at, summary` | Provenance root for explanations. |
-| `StateRevision` | `n, at` | Monotonic counter, bumped on every evidence insert; used for recheck-before-act (invariant #4). |
-| `ExecutionAttempt` | `id, sent_at, ack_at, status` (`"sent"`/`"acked"`/`"verified"`/`"failed"`) | Command ≠ ack ≠ verified (invariant #3). |
-
-## Relationships
-
-### Infrastructure
-| Type | From → To | Properties | Meaning |
-|---|---|---|---|
-| `FEEDS` | `Asset → Asset` | `max_flow` (optional) | Directed operational flow path. |
-| `CONNECTED_TO` | `Asset — Asset` | | Physical pipe; no implication of sufficiency (DP2). |
-| `LOCATED_IN` | `Asset / InspectionPoint / Sensor → Location` | | |
-| `PROVIDES_SERVICE` | `Machine → Service` | | |
-| `MEASURES` | `Sensor → Asset` | `property` | Fixed sensor coverage. |
-
-### Robot access
-| Type | From → To | Properties | Meaning |
-|---|---|---|---|
-| `ADJACENT_TO` | `Location — Location` | `cost` (seconds) | Navigable hop; route = cheapest path. |
-| `INSPECTS` | `InspectionPoint → Asset` | `property` | What can be read there (`health`, `capacity`, `position`, `flow`, `temperature`). |
-| `AT` | `Robot → Location` | `since` | Current verified location (DP4). Exactly one. |
-
-### Evidence & hypotheses
-| Type | From → To | Properties |
-|---|---|---|
-| `ABOUT` | `Observation → Asset` | |
-| `PRODUCED_BY` | `Observation → Sensor / Robot` | |
-| `DURING` | `Observation → Incident` | |
-| `SUPPORTS` / `CONTRADICTS` | `Observation → Hypothesis` | `rule` (which rule fired). Evidence, **not causation**. |
-| `HAS_HYPOTHESIS` | `Incident → Hypothesis` | |
-| `EXPECTS` | `Hypothesis → Asset` | `property, op, value`: the observation pattern this hypothesis predicts |
-| `DISTINGUISHED_BY` | `Hypothesis → InspectionPoint` | |
-
-### Actions, plans, provenance
-| Type | From → To | Properties |
-|---|---|---|
-| `REQUIRES` | `Action → Condition` | |
-| `CONDITION_ON` | `Condition → Asset` | |
-| `AFFECTS` | `Action → Asset` | `property, value` (declared effect, used by transition model) |
-| `HAS_STEP` | `Plan → PlanStep` | |
-| `EXECUTES` | `PlanStep → Action` | |
-| `NEXT` | `PlanStep → PlanStep` | |
-| `TRIGGERED_BY` | `Decision → Incident` | |
-| `CONSIDERED` | `Decision → Plan` | |
-| `REJECTED` | `Decision → Plan` | `reason` (validator output) |
-| `SELECTED` | `Decision → Plan` | |
-| `BASED_ON` | `Decision → Observation` | |
-| `AT_REVISION` | `Decision → StateRevision` | |
-| `RESULTED_IN` | `PlanStep → ExecutionAttempt` | |
-| `VERIFIED_BY` | `ExecutionAttempt → Observation` | |
-
-**Milestone 1 additions:** `(:Incident)-[:CONCERNS]->(:Asset)` (alarming asset);
-`(:ExecutionAttempt {asset_id, property, expected, sent_at, ack_at, status})-[:ATTEMPTS]->(:Action)`,
-`-[:DURING]->(:Incident)`, `-[:VERIFIED_BY]->(:Observation)`; `StateRevision` is a singleton
-`{id: 'current', n, at}` incremented by every `insert_observation` (Decisions will record `n`).
-
-**Milestone 2–3 additions:** `HypothesisTemplate {id, name}` (scenario data) with
-`-[:EXPECTS {property, op, value}]->(:Asset)` and `-[:DISTINGUISHED_BY]->(:InspectionPoint)`; instantiated per incident
-as `(:Incident)-[:HAS_HYPOTHESIS]->(:Hypothesis {id, template, name, status})` with copied edges. New inspection
-points `ip_primary_pump` (primary health), `ip_main_valve` (main valve position), `ip_machine_b` (machine B running);
-standby pump also INSPECTS `running`. New condition `c_primary_failed` on `isolate_primary`.
-
-**Changes vs CLAUDE.md §6 draft:** `InspectionPoint` is its own label (DP3); added `AT`, `MEASURES`, `EXECUTES`, `HAS_HYPOTHESIS`; dropped `REQUIRES_SERVICE` and `HAS_CAPABILITY` for v1 (machine cooling demand is a property; one robot with fixed capabilities; add back if multi-capability inspection matters).
-
-## Facility instance (scenario baseline)
+## Facility dependencies
 
 ```mermaid
-graph LR
-  PS[Supply: primary_supply<br/>nominal 8] -->|FEEDS| MIV[Valve: main_isolation]
-  SS[Supply: standby_supply<br/>nominal 8] -->|FEEDS| BV[Valve: bypass<br/>normally closed]
-  MIV -->|FEEDS| H[Header: cooling_header]
-  BV -->|FEEDS| H
-  H -->|FEEDS| MA[Machine: machine_a<br/>demand 4, critical]
-  H -->|FEEDS| MB[Machine: machine_b<br/>demand 3, low]
-  MA -->|PROVIDES_SERVICE| SA[Service: line_a<br/>critical]
-  MB -->|PROVIDES_SERVICE| SB[Service: line_b]
-  IP1[InspectionPoint: ip_standby_pump] -->|INSPECTS health,capacity| SS
-  IP2[InspectionPoint: ip_bypass_valve] -->|INSPECTS position| BV
-  IP3[InspectionPoint: ip_header_flow] -->|INSPECTS flow| H
-  R[Robot] -->|AT| L0[Location: dock]
+flowchart LR
+    PS[Supply: primary_supply] -->|FEEDS| Main[Valve: main_isolation]
+    SS[Supply: standby_supply] -->|FEEDS| Bypass[Valve: bypass]
+    Main -->|FEEDS| H[Header: cooling_header]
+    Bypass -->|FEEDS| H
+    H -->|FEEDS| A[Machine: machine_a / demand 4]
+    H -->|FEEDS| B[Machine: machine_b / demand 3]
+    A -->|PROVIDES_SERVICE| SA[Service: line_a / critical]
+    B -->|PROVIDES_SERVICE| SB[Service: line_b]
 ```
 
-Locations (`dock`, `primary_bay`, `standby_bay`, `header_room`, `machine_hall`) are linked by `ADJACENT_TO {cost}`; each asset and inspection point is `LOCATED_IN` one of them.
+`Asset` is a shared label on `Supply`, `Valve`, `Header` and `Machine`. Static properties include `id`, `name`, `nominal_capacity` for supplies, `normally` for valves, and `demand`/`criticality` for machines. A supply's observed usable capacity can differ from its nominal design capacity.
 
-## Query patterns this model enables (implemented in `graph/queries/`)
-| Question | Pattern |
-|---|---|
-| What's downstream of X? (multi-hop impact) | `(x:Asset {id})-[:FEEDS*1..]->(d:Asset)` |
-| Which critical services are hit? | …`(d:Machine)-[:PROVIDES_SERVICE]->(s:Service {critical:true})` |
-| Alternate supplies for a machine | `(s:Supply)-[:FEEDS*]->(m:Machine {id})` where `s` ≠ faulted |
-| Latest evidence for (asset, property) | `(o:Observation {property})-[:ABOUT]->(a)` ordered by `observed_at` desc, limit 1 |
-| Stale / missing evidence | latest observation older than `$windows[property]`, or none |
-| Can the robot read X here? | `(r:Robot)-[:AT]->(l)<-[:LOCATED_IN]-(ip)-[:INSPECTS]->(x)` |
-| Prerequisites of an action | `(a:Action {id})-[:REQUIRES]->(c:Condition)-[:CONDITION_ON]->(x)` |
-| Why was this chosen? | `(d:Decision {id})-[:CONSIDERED|REJECTED|SELECTED|BASED_ON]->(...)` |
+`FEEDS` is directed operational reachability. `CONNECTED_TO` represents physical connectivity and is queried with undirected meaning. A flow path does not prove adequate capacity: [capacity.py](../backend/ripple/planning/capacity.py) combines topology with usable observations and active machine demand.
 
-## Indexes (to add in `graph/schema.py`)
-Range indexes on `id` for `Asset, Location, InspectionPoint, Action, Hypothesis, Incident, Decision`;
-on `Observation.property` (latest-evidence lookups). Verify FalkorDB index syntax in docs before writing.
+A `Service` has `id`, `name`, and boolean `critical`. `PROVIDES_SERVICE` connects machines to services. The `new_load` scenario adds Machine C (demand 2), its service and relationships through YAML without changing planner code.
+
+## Location and inspection
+
+- `Location {id, name, x, y}` nodes connect through `ADJACENT_TO {cost}`. Costs are synthetic route weights, not measured physical travel times.
+- `Robot {id, name}` has one `AT {since}` relationship to its verified location.
+- `Asset`, `InspectionPoint` and `Sensor` nodes use `LOCATED_IN` to connect to locations.
+- `InspectionPoint {id, name}` connects to assets through `INSPECTS {property}`. An inspection point is not an asset.
+- `Sensor {id, kind}` uses `MEASURES {property}` for coverage.
+
+The routing query uses `algo.SPpaths` over `ADJACENT_TO` with `weightProp: 'cost'`, `relDirection: 'both'` and `pathCount: 1`. The adapter must confirm arrival before the `AT` relationship moves. Sensing requires the robot and inspection point to share a location.
+
+## Evidence and hypotheses
+
+```mermaid
+flowchart LR
+    Observation -->|PRODUCED_BY| Robot
+    Observation -->|ABOUT| Asset
+    Observation -->|DURING| Incident
+    Observation -->|SUPPORTS or CONTRADICTS| Hypothesis
+    Incident -->|HAS_HYPOTHESIS| Hypothesis
+    Hypothesis -->|EXPECTS| Asset
+    Hypothesis -->|DISTINGUISHED_BY| InspectionPoint
+```
+
+An `Observation` stores `id`, `property`, `value`, optional `unit`, `observed_at`, `ingested_at`, `quality`, `source` and optional `mission_id`. Sources are `robot`, `sensor`, `log`, or branch-local `predicted`. `ABOUT` identifies the asset, `PRODUCED_BY` identifies a known producer, and `DURING` links incident observations.
+
+Dynamic equipment state is evidence rather than a mutable status property on the asset. Observations are appended; the latest observation for an asset/property is selected and checked against that property's freshness window. A stale latest observation is not made valid by falling back to an older one. See [beliefs](../backend/ripple/evidence/beliefs.py) and [freshness windows](../backend/ripple/evidence/freshness.py).
+
+`Incident {id, opened_at, status}` has `CONCERNS` to the triggering asset. Scenario `HypothesisTemplate` nodes have `EXPECTS {property, op, value}` and `DISTINGUISHED_BY` edges. These are instantiated as incident-specific `Hypothesis {id, template, name, status}` nodes. `SUPPORTS` and `CONTRADICTS` store the applied rule; they express evidence, not proof of causation or calibrated probabilities.
+
+Demo events use a synthetic logical clock. Timestamps are comparable within the run but must not be presented as measured physical outage durations.
+
+## Actions, decisions and verification
+
+```mermaid
+flowchart LR
+    Action -->|REQUIRES| Condition
+    Condition -->|CONDITION_ON| Asset
+    Action -->|AFFECTS: property and value| Asset
+    Decision -->|TRIGGERED_BY| Incident
+    Decision -->|CONSIDERED| Plan
+    Decision -->|SELECTED or REJECTED| Plan
+    Decision -->|BASED_ON| Observation
+    Attempt[ExecutionAttempt] -->|ATTEMPTS| Action
+    Attempt -->|DURING| Incident
+    Attempt -->|VERIFIED_BY| Observation
+```
+
+- `Action {id, name, kind}` declares effects through `AFFECTS {property, value}`.
+- `Condition` has `id`, `property`, `op`, `value`, `kind`, and optionally `check`. Evidence conditions require usable observations; computed conditions such as demand-within-capacity call application checks. All required conditions must pass.
+- `Plan {id, name, actions}` stores the **ordered array of action IDs** used in this implementation.
+- `Decision {id, made_at, summary, revision}` records the graph revision as a **number property**. It has `TRIGGERED_BY`, `CONSIDERED`, `SELECTED`, `REJECTED {reason}` and `BASED_ON` relationships.
+- `StateRevision {id: 'current', n, at}` is a singleton updated on observation insert. The revision is not an immutable historical graph snapshot or an atomic physical-actuation lock.
+- `ExecutionAttempt` includes `id`, `asset_id`, `property`, `expected`, `sent_at`, `ack_at`, and `status`. Runtime states distinguish sent/acknowledged/rejected from verified/failed effects. `VERIFIED_BY` points to the checking observation.
+
+The decision records the available non-predicted evidence context at selection time. This is not a minimal proof graph identifying only the observations used by each condition. Execution attempts link to the incident and action; the current implementation does not persist `PlanStep`, `HAS_STEP`, `NEXT`, `EXECUTES`, `RESULTED_IN` or `AT_REVISION` relationships proposed in earlier drafts.
+
+## Counterfactual graph branches
+
+[branching.py](../backend/ripple/graph/branching.py) calls the real FalkorDB `GRAPH.COPY` mechanism through the SDK. [evaluator.py](../backend/ripple/planning/evaluator.py) checks action prerequisites and inserts declared effects as observations with `source='predicted'` in that copy. Missing evidence remains unresolved; projections cannot make an undecided plan executable. Branches are deleted in a `finally` block, including on evaluation errors.
+
+The live graph receives actual simulator/robot observations and execution records, not hypothetical effect writes. A graph copy supplies state isolation; the transition model and capacity checks supply domain semantics.
+
+## Indexes actually created
+
+[schema.py](../backend/ripple/graph/schema.py) creates range indexes on `id` for Asset, Location, InspectionPoint, Action, Condition, Robot, Observation, Incident and ExecutionAttempt, and on `Observation.property`. Creation is idempotent. Indexes for Decision or Hypothesis are not currently created.
+
+## Design choices and limits
+
+The accepted DP1–DP5 choices remain: observations hold changing state; physical and operational connections are separate; inspection points have their own label; robot location updates follow verified arrival; predicted observations stay in branches. See [decisions](decisions.md).
+
+Capacity, freshness and ranking are application rules over graph data. Short candidate sequences are bounded to this cooling domain. There is one robot and no learned perception, probabilistic causal model, full fluid/thermal simulation, or automatic replanning after verification failure.
